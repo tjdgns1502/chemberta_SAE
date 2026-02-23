@@ -24,6 +24,13 @@ from transformers import (
     RobertaTokenizerFast,
 )
 
+# MoleculeNet benchmark standard split settings (from ChemBERTa paper)
+MOLNET_SPLITS = {
+    "bace_classification": "scaffold",
+    "bbbp": "scaffold",
+    "clintox": "scaffold",
+}
+
 
 def _capstone_root() -> Path:
     """Find capstone project root directory."""
@@ -448,13 +455,16 @@ class SaeExperimentConfig:
     topk: int = 32
     sae_lr: float = 1e-4
     sae_batch_size: int = 2048
-    sae_epochs: int = 2
+    sae_epochs: int = 20
     l1_weight: float = 0.0
     chunk_size: int = 20000
     val_fraction: float = 0.05
+    early_stopping_patience: int = 5  # Stop if val loss doesn't improve for 5 epochs
     seed: int = 42
+    num_seeds: int = 5  # ChemBERTa paper uses 5 seeds (0-4) for mean±std
 
     layers: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    downstream_batch_size: int = 64  # ChemBERTa paper uses 64
 
     runs_dir: Path = _capstone_root() / "runs/sae"
     acts_dir: Path = _capstone_root() / "runs/sae/acts"
@@ -598,6 +608,13 @@ def train_sae_for_layer(
     start_epoch = 0
     global_step = 0
     ckpt_dir = cfg.ckpt_dir / f"layer_{layer}"
+    
+    # Early stopping and loss tracking
+    best_val_loss = float('inf')
+    patience_counter = 0
+    train_losses = []
+    val_losses = []
+    
     if resume:
         latest = _latest_checkpoint(ckpt_dir)
         if latest is not None:
@@ -606,6 +623,9 @@ def train_sae_for_layer(
             optimizer.load_state_dict(state["optimizer"])
             start_epoch = state["epoch"] + 1
             global_step = state["step"]
+            best_val_loss = state.get("best_val_loss", float('inf'))
+            train_losses = state.get("train_losses", [])
+            val_losses = state.get("val_losses", [])
 
     for epoch in range(start_epoch, cfg.sae_epochs):
         ae.train()
@@ -652,6 +672,31 @@ def train_sae_for_layer(
                 val_loss += loss.item()
                 val_batches += 1
 
+        train_loss_avg = train_loss / max(1, num_batches)
+        val_loss_avg = val_loss / max(1, val_batches)
+        train_losses.append(train_loss_avg)
+        val_losses.append(val_loss_avg)
+        
+        # Early stopping check
+        if val_loss_avg < best_val_loss:
+            best_val_loss = val_loss_avg
+            patience_counter = 0
+            # Save best model
+            _save_checkpoint(
+                ckpt_dir / "best.pt",
+                {
+                    "model": ae.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "step": global_step,
+                    "best_val_loss": best_val_loss,
+                    "train_losses": train_losses,
+                    "val_losses": val_losses,
+                },
+            )
+        else:
+            patience_counter += 1
+        
         _save_checkpoint(
             ckpt_dir / f"checkpoint_step_{global_step}.pt",
             {
@@ -659,6 +704,9 @@ def train_sae_for_layer(
                 "optimizer": optimizer.state_dict(),
                 "epoch": epoch,
                 "step": global_step,
+                "best_val_loss": best_val_loss,
+                "train_losses": train_losses,
+                "val_losses": val_losses,
             },
         )
         _save_checkpoint(
@@ -668,15 +716,42 @@ def train_sae_for_layer(
                 "optimizer": optimizer.state_dict(),
                 "epoch": epoch,
                 "step": global_step,
+                "best_val_loss": best_val_loss,
+                "train_losses": train_losses,
+                "val_losses": val_losses,
             },
         )
 
         print(
             f"[layer {layer}] epoch {epoch+1}/{cfg.sae_epochs} "
-            f"train_loss={train_loss/max(1,num_batches):.4f} "
-            f"val_loss={val_loss/max(1,val_batches):.4f}"
+            f"train_loss={train_loss_avg:.4f} val_loss={val_loss_avg:.4f} "
+            f"(best={best_val_loss:.4f}, patience={patience_counter}/{cfg.early_stopping_patience})"
         )
-
+        
+        # Early stopping
+        if patience_counter >= cfg.early_stopping_patience:
+            print(f"[layer {layer}] Early stopping triggered at epoch {epoch+1}")
+            # Load best model
+            best_state = torch.load(ckpt_dir / "best.pt", map_location=device)
+            ae.load_state_dict(best_state["model"])
+            break
+    
+    # Save loss plot
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(train_losses)+1), train_losses, label='Train Loss', marker='o')
+    plt.plot(range(1, len(val_losses)+1), val_losses, label='Val Loss', marker='s')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title(f'SAE Training - Layer {layer}')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(ckpt_dir / f"layer_{layer}_loss_curve.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    
     return ae
 
 
@@ -709,16 +784,18 @@ def compute_latent_features(
         flat = attn.reshape(-1, attn.shape[-1])
         latents, _ = ae.encode(flat)
         latents = latents.reshape(attn.shape[0], attn.shape[1], -1)
-        mask = attention_mask.unsqueeze(-1).float()
-        pooled = (latents * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-        feats.append(pooled.cpu())
+        # Use CLS token (first token) instead of mean pooling
+        cls_latent = latents[:, 0, :]
+        feats.append(cls_latent.cpu())
         labels.append(label)
         label_masks.append(label_mask)
     return torch.cat(feats, dim=0).numpy(), torch.cat(labels, dim=0).numpy(), torch.cat(label_masks, dim=0).numpy()
 
 
-def train_linear_probe(X_train: np.ndarray, y_train: np.ndarray):
-    clf = LogisticRegression(max_iter=1000)
+def train_linear_probe(X_train: np.ndarray, y_train: np.ndarray, random_state: int = 42):
+    """Train linear probe with stochastic solver for variance across seeds."""
+    # Use 'saga' solver for stochastic optimization (allows random_state to affect results)
+    clf = LogisticRegression(max_iter=1000, random_state=random_state, solver='saga')
     clf.fit(X_train, y_train)
     return clf
 
@@ -738,17 +815,50 @@ def append_csv_row(path: Path, row: dict) -> None:
         writer.writerow(row)
 
 
-def evaluate_downstream(
+def compute_original_features(
+    model: RobertaForMaskedLM,
+    dataloader: DataLoader,
+    layer: int,
+    device: torch.device,
+):
+    """Extract original attention output features (no SAE) for baseline comparison."""
+    model.eval()
+    feats = []
+    labels = []
+    label_masks = []
+    for batch in dataloader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        label = batch["labels"].cpu()
+        label_mask = batch["label_mask"].cpu()
+
+        _, attn_outputs = model.roberta(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_attn_outputs=True,
+            attn_output_layers={layer},
+        )
+        attn = attn_outputs[layer]
+        # Use CLS token (ChemBERTa standard)
+        cls_feat = attn[:, 0, :]
+        feats.append(cls_feat.detach().cpu())
+        labels.append(label)
+        label_masks.append(label_mask)
+    return torch.cat(feats, dim=0).numpy(), torch.cat(labels, dim=0).numpy(), torch.cat(label_masks, dim=0).numpy()
+
+
+def evaluate_baseline_frozen(
     cfg: SaeExperimentConfig,
     model: RobertaForMaskedLM,
-    ae: Autoencoder,
     tokenizer: RobertaTokenizerFast,
     layer: int,
     device: torch.device,
 ):
+    """Baseline: Frozen backbone + original features + linear probe."""
     for task in cfg.downstream_tasks:
+        split_type = MOLNET_SPLITS.get(task, "scaffold")
         tasks, (train_df, valid_df, test_df), _ = load_molnet_dataset(
-            task, df_format="chemprop"
+            task, split=split_type, df_format="chemprop"
         )
         label_cols = list(tasks)
         
@@ -758,8 +868,97 @@ def evaluate_downstream(
         test_dataset = SmilesClassificationDataset(
             test_df, tokenizer, label_cols, max_len=cfg.max_len
         )
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+        train_loader = DataLoader(train_dataset, batch_size=cfg.downstream_batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=cfg.downstream_batch_size, shuffle=False)
+
+        X_train, y_train, y_train_mask = compute_original_features(
+            model, train_loader, layer, device
+        )
+        X_test, y_test, y_test_mask = compute_original_features(
+            model, test_loader, layer, device
+        )
+
+        # Take first task only (single-label classification)
+        if y_train.ndim > 1:
+            y_train, y_train_mask = y_train[:, 0], y_train_mask[:, 0]
+            y_test, y_test_mask = y_test[:, 0], y_test_mask[:, 0]
+
+        # Filter out NaN labels
+        mask_train = y_train_mask.astype(bool)
+        mask_test = y_test_mask.astype(bool)
+        
+        if mask_train.sum() == 0 or mask_test.sum() == 0:
+            print(f"[layer {layer}] {task} - No valid samples, skipping")
+            continue
+        
+        # Run with multiple seeds (different solver initialization)
+        roc_aucs = []
+        for seed_idx in range(cfg.num_seeds):
+            seed = cfg.seed + seed_idx
+            np.random.seed(seed)
+            random.seed(seed)
+            
+            clf = train_linear_probe(X_train[mask_train], y_train[mask_train], random_state=seed)
+            roc = eval_roc_auc(clf, X_test[mask_test], y_test[mask_test])
+            roc_aucs.append(roc)
+        
+        roc_mean = np.mean(roc_aucs)
+        roc_std = np.std(roc_aucs)
+        
+        print(f"[BASELINE-FROZEN layer {layer}] {task} ROC-AUC={roc_mean:.4f}±{roc_std:.4f}")
+
+        row = {
+            "run_id": f"{int(time.time())}",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "model_name": cfg.model_name,
+            "layer": layer,
+            "attn_source": "attn_output",
+            "sae_apply_mode": "none",
+            "sae_training_mode": "none",
+            "backbone_frozen": True,
+            "sae_type": "none",
+            "n_latents": 0,
+            "k": 0,
+            "l1_weight": 0.0,
+            "lr": 0.0,
+            "batch_size": 0,
+            "epochs": 0,
+            "seed": cfg.seed,
+            "num_seeds": cfg.num_seeds,
+            "downstream_task": task,
+            "downstream_method": "original_probe",
+            "pooling": "cls",
+            "probe_model": "linear",
+            "roc_auc_mean": roc_mean,
+            "roc_auc_std": roc_std,
+            "split_type": split_type,
+        }
+        append_csv_row(cfg.log_path, row)
+
+
+def evaluate_downstream(
+    cfg: SaeExperimentConfig,
+    model: RobertaForMaskedLM,
+    ae: Autoencoder,
+    tokenizer: RobertaTokenizerFast,
+    layer: int,
+    device: torch.device,
+):
+    for task in cfg.downstream_tasks:
+        split_type = MOLNET_SPLITS.get(task, "scaffold")
+        tasks, (train_df, valid_df, test_df), _ = load_molnet_dataset(
+            task, split=split_type, df_format="chemprop"
+        )
+        label_cols = list(tasks)
+        
+        train_dataset = SmilesClassificationDataset(
+            train_df, tokenizer, label_cols, max_len=cfg.max_len
+        )
+        test_dataset = SmilesClassificationDataset(
+            test_df, tokenizer, label_cols, max_len=cfg.max_len
+        )
+        train_loader = DataLoader(train_dataset, batch_size=cfg.downstream_batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=cfg.downstream_batch_size, shuffle=False)
 
         X_train, y_train, y_train_mask = compute_latent_features(
             model, ae, train_loader, layer, device
@@ -780,9 +979,23 @@ def evaluate_downstream(
         if mask_train.sum() == 0 or mask_test.sum() == 0:
             print(f"[layer {layer}] {task} - No valid samples, skipping")
             continue
+        
+        # Run with multiple seeds (different solver initialization)
+        roc_aucs = []
+        for seed_idx in range(cfg.num_seeds):
+            seed = cfg.seed + seed_idx
+            np.random.seed(seed)
+            random.seed(seed)
             
-        clf = train_linear_probe(X_train[mask_train], y_train[mask_train])
-        roc = eval_roc_auc(clf, X_test[mask_test], y_test[mask_test])
+            clf = train_linear_probe(X_train[mask_train], y_train[mask_train], random_state=seed)
+            roc = eval_roc_auc(clf, X_test[mask_test], y_test[mask_test])
+            roc_aucs.append(roc)
+        
+        roc_mean = np.mean(roc_aucs)
+        roc_std = np.std(roc_aucs)
+        
+        print(f"Using tasks {label_cols} from available tasks for {task}: {list(tasks)}")
+        print(f"[layer {layer}] {task} ROC-AUC={roc_mean:.4f}±{roc_std:.4f}")
 
         row = {
             "run_id": f"{int(time.time())}",
@@ -801,15 +1014,16 @@ def evaluate_downstream(
             "batch_size": cfg.sae_batch_size,
             "epochs": cfg.sae_epochs,
             "seed": cfg.seed,
-            "mlm_data_path": str(cfg.mlm_data_path),
+            "num_seeds": cfg.num_seeds,
             "downstream_task": task,
             "downstream_method": "latent_probe",
-            "pooling": "mean",
+            "pooling": "cls",  # CLS token (ChemBERTa standard)
             "probe_model": "linear",
-            "roc_auc": roc,
+            "roc_auc_mean": roc_mean,
+            "roc_auc_std": roc_std,
+            "split_type": split_type,
         }
         append_csv_row(cfg.log_path, row)
-        print(f"[layer {layer}] {task} ROC-AUC={roc:.4f}")
 
 
 def run_all(cfg: SaeExperimentConfig, resume: bool = True):
@@ -823,9 +1037,21 @@ def run_all(cfg: SaeExperimentConfig, resume: bool = True):
     mlm_loader = prepare_mlm_loader(cfg, tokenizer)
     extract_attn_activations(cfg, model, mlm_loader, device)
 
+    # Train SAE for all layers
     for layer in cfg.layers:
+        print(f"\n{'='*60}")
+        print(f"SAE TRAINING & EVALUATION - Layer {layer}")
+        print(f"{'='*60}")
         ae = train_sae_for_layer(cfg, layer, device, resume=resume)
         evaluate_downstream(cfg, model, ae, tokenizer, layer, device)
+    
+    # Baseline evaluation (once at the end for all layers)
+    print(f"\n{'='*60}")
+    print(f"BASELINE EVALUATION (Frozen backbone)")
+    print(f"{'='*60}")
+    for layer in cfg.layers:
+        print(f"\n--- Layer {layer} ---")
+        evaluate_baseline_frozen(cfg, model, tokenizer, layer, device)
 
 
 if __name__ == "__main__":
