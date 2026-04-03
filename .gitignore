@@ -1,36 +1,22 @@
-# Python
+# Byte-compiled / cache
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Artifacts
+artifacts/runs/*
+artifacts/logs/*
+artifacts/checkpoints/*
+!artifacts/runs/.gitkeep
+!artifacts/logs/.gitkeep
+!artifacts/checkpoints/.gitkeep
 
-# Model checkpoints
-**/checkpoint-*/
-**/checkpoints/
-**/final/
-
-# Data files (exclude large files, but keep essential datasets)
-*.txt
-# Keep essential files
-!requirements.txt
-!data/BBBP.csv
-!data/bace.csv
-
-# Logs and runs
-logs/
-runs/
-
-# Environment
+# Local env
 .env
+.venv/
 venv/
-env/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# Experiment logging
+wandb/
+
+# Build metadata
+*.egg-info/

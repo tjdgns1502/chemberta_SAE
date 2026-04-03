@@ -1,0 +1,51 @@
+{
+  "run_id": "layer0_causal_bace_group_force_20260319",
+  "task": "bace_classification",
+  "layer": 0,
+  "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+  "mode": "force_on",
+  "feature_indices": [
+    327,
+    1419,
+    1785
+  ],
+  "control_kind": "matched_random",
+  "results": [
+    {
+      "run_id": "layer0_causal_bace_group_force_20260319",
+      "task": "bace_classification",
+      "layer": 0,
+      "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+      "condition": "target",
+      "control_kind": "matched_random",
+      "feature_indices": "327,1419,1785",
+      "feature_count": 3,
+      "mode": "force_on",
+      "baseline_roc_auc": 0.7261345852895149,
+      "baseline_roc_auc_std": 0.00015552550704220252,
+      "intervened_roc_auc": 0.7218918448965397,
+      "intervened_roc_auc_std": 8.518482847447009e-05,
+      "roc_auc_delta": -0.0042427403929752305,
+      "mean_logit_shift": 0.04907537251710892,
+      "mean_probability_shift": 0.004952201060950756
+    },
+    {
+      "run_id": "layer0_causal_bace_group_force_20260319",
+      "task": "bace_classification",
+      "layer": 0,
+      "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+      "condition": "control",
+      "control_kind": "matched_random",
+      "feature_indices": "51,228,1310",
+      "feature_count": 3,
+      "mode": "force_on",
+      "baseline_roc_auc": 0.7261345852895149,
+      "baseline_roc_auc_std": 0.00015552550704220252,
+      "intervened_roc_auc": 0.7263084680925056,
+      "intervened_roc_auc_std": 0.00019047906712053427,
+      "roc_auc_delta": 0.00017388280299068803,
+      "mean_logit_shift": -0.001745409471914172,
+      "mean_probability_shift": -6.641940854024142e-05
+    }
+  ]
+}

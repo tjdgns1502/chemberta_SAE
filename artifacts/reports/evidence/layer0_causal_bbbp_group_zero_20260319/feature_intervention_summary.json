@@ -1,0 +1,51 @@
+{
+  "run_id": "layer0_causal_bbbp_group_zero_20260319",
+  "task": "bbbp",
+  "layer": 0,
+  "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+  "mode": "zero",
+  "feature_indices": [
+    1237,
+    1492,
+    1402
+  ],
+  "control_kind": "matched_random",
+  "results": [
+    {
+      "run_id": "layer0_causal_bbbp_group_zero_20260319",
+      "task": "bbbp",
+      "layer": 0,
+      "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+      "condition": "target",
+      "control_kind": "matched_random",
+      "feature_indices": "1237,1492,1402",
+      "feature_count": 3,
+      "mode": "zero",
+      "baseline_roc_auc": 0.7015914351851852,
+      "baseline_roc_auc_std": 9.836071592579753e-05,
+      "intervened_roc_auc": 0.6982638888888889,
+      "intervened_roc_auc_std": 9.83607159257997e-05,
+      "roc_auc_delta": -0.00332754629629628,
+      "mean_logit_shift": -0.4165810227394104,
+      "mean_probability_shift": -0.028849269822239877
+    },
+    {
+      "run_id": "layer0_causal_bbbp_group_zero_20260319",
+      "task": "bbbp",
+      "layer": 0,
+      "checkpoint_path": "artifacts/runs/sae/v2_tanh_n2048_l0_5e2/probe/checkpoints/layer_0/best.pt",
+      "condition": "control",
+      "control_kind": "matched_random",
+      "feature_indices": "51,228,1310",
+      "feature_count": 3,
+      "mode": "zero",
+      "baseline_roc_auc": 0.7015914351851852,
+      "baseline_roc_auc_std": 9.836071592579753e-05,
+      "intervened_roc_auc": 0.7010223765432098,
+      "intervened_roc_auc_std": 0.00011247978192217588,
+      "roc_auc_delta": -0.0005690586419754284,
+      "mean_logit_shift": 0.004085942730307579,
+      "mean_probability_shift": 0.00035901510273106396
+    }
+  ]
+}
